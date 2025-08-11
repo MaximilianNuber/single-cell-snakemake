@@ -12,4 +12,5 @@ dependencies:
   - conda-forge::r-soupx
   - pip
   - pip:
+      - anndata2ri
       - "-e ../../"

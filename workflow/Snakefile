@@ -43,7 +43,8 @@ SAMPLES = list(config["samples"].keys())
 rule all:
     input:
         expand("results/qc/{sample}.metrics.h5ad", sample=SAMPLES),
-        expand("results/qc/{sample}.filtered.h5ad", sample=SAMPLES)
+        expand("results/qc/{sample}.filtered.h5ad", sample=SAMPLES),
+        "results/integration/concat.h5ad"
 
 # -----------------------------
 # 1) QC metrics (Scanpy only)
@@ -126,6 +127,34 @@ rule qc_filter:
         "environments/scanpy.yaml"
     script:
         "scripts/qc_filter.py"
+
+
+SAMPLES = list(config["samples"].keys())
+
+rule concat_samples:
+    input:
+        expand("results/qc/{s}.filtered.h5ad", s=SAMPLES)
+    output:
+        "results/integration/concat.h5ad"
+    params:
+        batch_key = lambda wc: config.get("integration", {}).get("batch_key", "sample")
+    conda:
+        "environments/scanpy.yaml"
+    script:
+        "scripts/concat_samples.py"
+
+rule embed_counts:
+    input:
+        "results/integration/concat.h5ad"
+    output:
+        dir = directory("results/integration/embedding")
+    params:
+        target_sum=1e4, log1p=True, n_hvgs=2000, hvg_flavor="seurat_v3",
+        scale_max=10.0, n_comps=50, zero_center=True, svd_solver="arpack", random_state=0
+    conda:
+        "workflow/environments/scanpy.yaml"
+    script:
+        "workflow/scripts/embed_counts.py"
 
 
 # # workflow/Snakefile
