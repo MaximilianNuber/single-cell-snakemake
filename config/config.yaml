@@ -1,0 +1,24 @@
+# config/config.yaml
+samples:
+  S01: "/Users/maximiliannuber/Documents/my_packages/snakemake_test/snakemake_bioinfo_project/snakemake_test_data/pbmc10k/outs/filtered_feature_bc_matrix"
+qc:
+  percent_top: [20]
+  min_cells_per_gene: 3
+  nmads_total_counts: 5
+  nmads_n_genes: 5
+  nmads_pct_top: 5
+  nmads_pct_mito: 3
+  max_pct_mito: 8
+  keep_doublets: false    # drop doublets by default
+
+tools:
+  emptydrops: {lower: 100, fdr_cutoff: 0.01}        # or {lower: 100, fdr_cutoff: 0.01} or null
+  soupx: null             # or {raw_10x_dir: "/path/outs/raw_feature_bc_matrix", layer_out: "soupx_corrected"}
+  doublets:               # choose one of: null | scdblfinder | scrublet
+    method: "scrublet" # or "scrublet"
+    params:
+      batch_key: null     # used only for scDblFinder
+      # scrublet params (if using scrublet):
+      # expected_doublet_rate: 0.06
+      # min_counts: 2
+      # min_cells: 3

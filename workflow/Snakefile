@@ -1,0 +1,212 @@
+# -----------------------------
+# QC Snakefile (metrics → doublets → filter)
+# -----------------------------
+# Usage:
+#   snakemake --snakefile workflow/Snakefile --configfile config/config.yaml -n
+#   snakemake --snakefile workflow/Snakefile --configfile config/config.yaml --use-conda --cores 4
+#
+# Expected config (config/config.yaml):
+# samples:
+#   S01: "/abs/path/outs/filtered_feature_bc_matrix"
+#   S02: "/abs/path/outs/filtered_feature_bc_matrix"
+#
+# qc:
+#   percent_top: [20]
+#   min_cells_per_gene: 3
+#   nmads_total_counts: 5
+#   nmads_n_genes: 5
+#   nmads_pct_top: 5
+#   nmads_pct_mito: 3
+#   max_pct_mito: 8
+#   keep_doublets: false
+#
+# tools:
+#   emptydrops: null
+#   soupx: null
+#   doublets:
+#     method: "scdblfinder"   # or "scrublet" or null
+#     params:
+#       batch_key: null       # for scDblFinder
+#       # scrublet params:
+#       # expected_doublet_rate: 0.06
+#       # min_counts: 2
+#       # min_cells: 3
+# -----------------------------
+
+import os
+
+# If you want to hardwire a config file, uncomment next line (CLI --configfile overrides it anyway)
+# configfile: "config/config.yaml"
+
+SAMPLES = list(config["samples"].keys())
+
+rule all:
+    input:
+        expand("results/qc/{sample}.metrics.h5ad", sample=SAMPLES),
+        expand("results/qc/{sample}.filtered.h5ad", sample=SAMPLES)
+
+# -----------------------------
+# 1) QC metrics (Scanpy only)
+# -----------------------------
+rule qc_metrics:
+    input:
+        matrix = lambda wc: config["samples"][wc.sample]
+    output:
+        h5ad = "results/qc/{sample}.metrics.h5ad"
+    params:
+        percent_top = lambda wc: config.get("qc", {}).get("percent_top", [20])
+    conda:
+        "environments/r_qc.yaml"
+    script:
+        "scripts/qc_compute_metrics.py"
+
+# -----------------------------
+# 2) Doublets (choose by config)
+#    Writes a standard TSV: barcode, is_doublet, dbl_score
+# -----------------------------
+
+DBL_METHOD = (
+    config.get("tools", {})
+          .get("doublets", {})
+          .get("method", None)
+)
+
+if DBL_METHOD == "scdblfinder":
+    rule doublets:
+        input:
+            h5ad = "results/qc/{sample}.metrics.h5ad"
+        output:
+            tsv = "results/qc/{sample}.doublets.tsv"
+        params:
+            batch_key = lambda wc: config["tools"]["doublets"]["params"].get("batch_key", None)
+        conda:
+            "environments/r_qc.yaml"
+        script:
+            "scripts/run_scdblfinder.py"
+
+elif DBL_METHOD == "scrublet":
+    rule doublets:
+        input:
+            h5ad = "results/qc/{sample}.metrics.h5ad"
+        output:
+            tsv = "results/qc/{sample}.doublets.tsv"
+        params:
+            scrublet_params = lambda wc: config["tools"]["doublets"]["params"]
+        conda:
+            "environments/scrublet_legacy.yaml"
+        script:
+            "scripts/run_scrublet.py"
+
+else:
+    # No doublet caller selected: emit an empty TSV header so downstream rule has predictable input.
+    rule doublets:
+        input:
+            h5ad = "results/qc/{sample}.metrics.h5ad"
+        output:
+            tsv = "results/qc/{sample}.doublets.tsv"
+        run:
+            os.makedirs(os.path.dirname(output.tsv), exist_ok=True)
+            with open(output.tsv, "w") as f:
+                f.write("barcode\tis_doublet\tdbl_score\n")
+
+# -----------------------------
+# 3) Filter (MAD thresholds + optional doublet removal)
+#    Consumes metrics H5AD and doublets TSV
+# -----------------------------
+rule qc_filter:
+    input:
+        h5ad = "results/qc/{sample}.metrics.h5ad",
+        dbl  = "results/qc/{sample}.doublets.tsv"
+    output:
+        h5ad = "results/qc/{sample}.filtered.h5ad"
+    params:
+        qc_cfg = lambda wc: config.get("qc", {}),
+        percent_top = lambda wc: (config.get("qc", {}).get("percent_top", [20]) or [20])[0]
+    conda:
+        "environments/scanpy.yaml"
+    script:
+        "scripts/qc_filter.py"
+
+
+# # workflow/Snakefile
+# configfile: "config/config.yaml"
+
+# SAMPLES = list(config["samples"].keys())
+
+# rule all:
+#     input:
+#         expand("results/qc/{sample}.metrics.h5ad", sample=SAMPLES),
+#         expand("results/qc/{sample}.filtered.h5ad", sample=SAMPLES)
+
+# # ---- 1) Compute metrics (Scanpy) ----
+# rule qc_metrics:
+#     input:
+#         matrix = lambda wildcards: config["samples"][wildcards.sample]
+#     output:
+#         h5ad = "results/qc/{sample}.metrics.h5ad"
+#     params:
+#         percent_top = lambda wc: config["qc"].get("percent_top", [20]),
+#         # tool configs for optional R steps (we run only if configured)
+#         emptydrops = config["tools"].get("emptydrops", None),
+#         soupx     = config["tools"].get("soupx", None),
+#         scdbl     = (config["tools"]["doublets"]["params"]
+#                      if config["tools"].get("doublets", {}).get("method") == "scdblfinder" else None)
+#     conda: "environments/scanpy.yaml"   # metrics are pure scanpy; we call R in a separate rule below if you prefer
+#     script:
+#         "scripts/qc_compute_metrics.py"
+
+# # ---- 2a) scDblFinder (R) -> produce a simple TSV with is_doublet + score ----
+# rule scdblfinder:
+#     input:
+#         h5ad = "results/qc/{sample}.metrics.h5ad"
+#     output:
+#         tsv = "results/qc/{sample}.doublets.tsv"
+#     params:
+#         batch_key = lambda wc: (config["tools"]["doublets"]["params"].get("batch_key", None)
+#                                 if config["tools"].get("doublets", {}).get("method") == "scdblfinder" else None)
+#     conda: "environments/r_qc.yaml"
+#     script:
+#         "scripts/run_scdblfinder.py"
+#     # run:
+#     #     # If the chosen method isn't scDblFinder, mark output as empty to keep DAG happy.
+#     #     pass
+
+# # ---- 2b) Scrublet (legacy Python) -> same TSV format ----
+# rule scrublet:
+#     input:
+#         h5ad = "results/qc/{sample}.metrics.h5ad"
+#     output:
+#         tsv = "results/qc/{sample}.doublets.tsv"
+#     params:
+#         scrublet_params = lambda wc: config["tools"]["doublets"]["params"]
+#     conda: "environments/scrublet_legacy.yaml"
+#     script:
+#         "scripts/run_scrublet.py"
+#     # run:
+#     #     pass
+
+# # Choose exactly one doublet rule per sample depending on config
+# use rule scdblfinder as doublets with:
+#     run:
+#         if config["tools"].get("doublets", {}).get("method") != "scdblfinder":
+#             # produce an empty/no-op TSV if not selected
+#             shell("echo -e 'barcode\tis_doublet\tdbl_score' > {output.tsv}")
+
+# use rule scrublet as doublets_scrublet with:
+#     run:
+#         if config["tools"].get("doublets", {}).get("method") != "scrublet":
+#             shell("echo -e 'barcode\tis_doublet\tdbl_score' > {output.tsv}")
+
+# # ---- 3) Filter (merges doublets.tsv if it exists) ----
+# rule qc_filter:
+#     input:
+#         h5ad = "results/qc/{sample}.metrics.h5ad",
+#         dbl  = "results/qc/{sample}.doublets.tsv"
+#     output:
+#         h5ad = "results/qc/{sample}.filtered.h5ad"
+#     params:
+#         qc_cfg = config["qc"],
+#         percent_top = lambda wc: config["qc"].get("percent_top", [20])[0]  # first bucket
+#     conda: "environments/scanpy.yaml"
+#     script:
+#         "scripts/qc_filter.py"

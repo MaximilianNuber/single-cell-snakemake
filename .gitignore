@@ -1,0 +1,10 @@
+# Ignore results and large data files
+results/
+.snakemake/
+.apptainer/
+*.sif
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig

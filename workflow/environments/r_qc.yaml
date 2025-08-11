@@ -1,0 +1,14 @@
+name: r-qc-env
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - rpy2
+  - r-base
+  - bioconda::bioconductor-dropletutils
+  - bioconda::bioconductor-scdblfinder
+  - conda-forge::r-soupx
+  - pip
+  - pip:
+      - "-e ../../"

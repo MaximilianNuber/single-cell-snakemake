@@ -1,0 +1,33 @@
+# workflow/Snakefile
+
+import pandas as pd
+import os
+
+# Load configuration and sample sheet
+configfile: "config/config.yaml"
+SAMPLES = pd.read_csv("config/samples.tsv", sep="\t", index_col="sample_id")
+
+# --- Helper Functions ---
+# This function is crucial for defining our output paths dynamically.
+def get_workflow_output_dir(wildcards):
+    """
+    Returns the correct output directory path based on the chosen preprocessing workflow.
+    """
+    return f"results/{wildcards.sample}/{config['preprocessing_workflow']}"
+
+# --- Include Rule Files ---
+# We include all rule files here. Snakemake will only execute the rules
+# that are part of the dependency graph for the final target.
+include: "rules/common.smk"
+include: "rules/preprocessing.smk"  # We'll create this later
+include: "rules/downstream.smk"     # We'll create this later
+
+# --- Define the Final Target ---
+# This is the entry point for the entire workflow.
+# Snakemake will try to build this file and all its dependencies.
+rule all:
+    input:
+        expand(
+            os.path.join(get_workflow_output_dir, "final_clustered_object.h5ad"),
+            sample=SAMPLES.index
+        )

@@ -1,0 +1,16 @@
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - scikit-learn
+  - anndata
+  - h5py
+  - pandas
+  - pip
+  - pip:
+      - "scrublet==0.2.3"
+      - "-e ../../"   # installs your scpipe package from repo root

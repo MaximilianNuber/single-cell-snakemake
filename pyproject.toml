@@ -1,0 +1,13 @@
+[project]
+name = "scpipe"
+version = "0.1.0"
+requires-python = ">=3.9"
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# 🔧 Tell setuptools to ONLY include scpipe and its subpackages
+[tool.setuptools.packages.find]
+include = ["scpipe*"]
+exclude = ["workflow*", "envs*", "config*", "apptainer*", "single-cell-snakemake*"]
