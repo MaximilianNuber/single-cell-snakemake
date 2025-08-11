@@ -4,6 +4,7 @@ channels:
   - bioconda
 dependencies:
   - python=3.11
+  - scanpy
   - rpy2
   - r-base
   - bioconda::bioconductor-dropletutils
