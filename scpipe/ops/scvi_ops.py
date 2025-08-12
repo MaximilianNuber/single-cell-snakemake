@@ -39,6 +39,7 @@ def scvi_from_counts(
     Z = model.get_latent_representation()  # (cells x n_latent)
 
     return Result(
+        kind="embedding",
         outputs={"obsm.X_scvi": Z},
         state={"batch_key": batch_key, "layer": layer, "n_latent": n_latent, "max_epochs": max_epochs, "seed": seed},
     )

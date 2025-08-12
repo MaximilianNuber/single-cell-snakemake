@@ -35,16 +35,68 @@
 
 import os
 
-# If you want to hardwire a config file, uncomment next line (CLI --configfile overrides it anyway)
+import csv
+from pathlib import Path
+
+# ensure we have a config file (or pass --configfile on CLI)
 # configfile: "config/config.yaml"
 
-SAMPLES = list(config["samples"].keys())
+SHEET = Path(config.get("samples_tsv", "config/samples.tsv")).resolve()
+
+def _read_samplesheet(path: Path):
+    rows = []
+    with open(path, newline="") as f:
+        rdr = csv.DictReader(f, delimiter="\t")
+        required = {"sample", "matrix"}
+        if rdr.fieldnames is None or not required.issubset(rdr.fieldnames):
+            missing = required - set(rdr.fieldnames or [])
+            raise ValueError(f"Samples TSV missing columns: {sorted(missing)}")
+        for row in rdr:
+            s = (row.get("sample") or "").strip()
+            m = (row.get("matrix") or "").strip()
+            if not s or not m:
+                continue
+            rows.append({k: (v.strip() if isinstance(v, str) else v) for k, v in row.items()})
+    # resolve relative matrix paths relative to the TSV’s directory
+    base = path.parent.resolve()
+    def resolve(p):
+        p = Path(p)
+        return str((base / p).resolve()) if not p.is_absolute() else str(p)
+    # build mappings
+    sample_to_matrix = {}
+    sample_meta = {}
+    for r in rows:
+        if r["sample"] in sample_to_matrix:
+            raise ValueError(f"Duplicate sample '{r['sample']}' in {path}")
+        sample_to_matrix[r["sample"]] = resolve(r["matrix"])
+        sample_meta[r["sample"]] = {k: v for k, v in r.items() if k not in ("sample", "matrix")}
+    return sample_to_matrix, sample_meta
+
+# choose source
+if "samples" in config:
+    SAMPLE_TO_MATRIX = {str(k): str(v) for k, v in config["samples"].items()}
+    SAMPLE_META = {k: {} for k in SAMPLE_TO_MATRIX}
+elif "samples_tsv" in config:
+    SHEET = Path(config["samples_tsv"]).resolve()
+    SAMPLE_TO_MATRIX, SAMPLE_META = _read_samplesheet(SHEET)  # <-- unpack both
+else:
+    # optional default TSV if present
+    default_sheet = Path("config/samples.tsv")
+    if default_sheet.exists():
+        SAMPLE_TO_MATRIX, SAMPLE_META = _read_samplesheet(default_sheet.resolve())
+    else:
+        raise WorkflowError("Provide either `samples:` (dict) or `samples_tsv:` in config.")
+
+SAMPLES = sorted(SAMPLE_TO_MATRIX.keys())
+
 
 rule all:
     input:
         expand("results/qc/{sample}.metrics.h5ad", sample=SAMPLES),
         expand("results/qc/{sample}.filtered.h5ad", sample=SAMPLES),
-        "results/integration/concat.h5ad"
+        "results/integration/concat.h5ad",
+        expand("results/{run}/umap/umap.csv", run=RUNS),
+        expand("results/{run}/cluster/leiden.csv", run=RUNS)
 
 # -----------------------------
 # 1) QC metrics (Scanpy only)
@@ -129,32 +181,142 @@ rule qc_filter:
         "scripts/qc_filter.py"
 
 
-SAMPLES = list(config["samples"].keys())
 
+#############################################
+# 1) Integration runs & env selection       #
+#############################################
+_INTEG  = config.get("integration", {})
+_COMMON = _INTEG.get("common", {})
+_RUNS   = _INTEG.get("runs", [{"name": "unintegrated", "method": "none"}])
+
+RUNS   = [r["name"] for r in _RUNS]
+RUNCFG = {r["name"]: ({**_COMMON, **r}) for r in _RUNS}
+
+def rcfg(run_name):  # per-run merged config
+    return RUNCFG[run_name]
+
+_DEFAULT_ENVS = {
+    "integrate": {
+        "none":    "environments/scanpy.yaml",
+        "bbknn":   "environments/scanpy.yaml",
+        "harmony": "environments/harmony.yaml",
+        "scvi":    "environments/scvi.yaml",
+    },
+    "graph": {
+        "none":    "environments/scanpy.yaml",
+        "bbknn":   "environments/bbknn.yaml",
+        "harmony": "environments/scanpy.yaml",
+        "scvi":    "environments/scanpy.yaml",
+    },
+}
+
+def env_for(stage: str, method: str) -> str:
+    m = (method or "none").lower()
+    envs_cfg = config.get("integration", {}).get("envs", {})
+    return envs_cfg.get(stage, {}).get(m, _DEFAULT_ENVS[stage][m])
+
+############################
+# 2) Concat → combined.h5ad
+############################
 rule concat_samples:
     input:
         expand("results/qc/{s}.filtered.h5ad", s=SAMPLES)
     output:
         "results/integration/concat.h5ad"
     params:
-        batch_key = lambda wc: config.get("integration", {}).get("batch_key", "sample")
+        batch_key = lambda wc: _COMMON.get("batch_key", "sample")
     conda:
         "environments/scanpy.yaml"
     script:
         "scripts/concat_samples.py"
 
-rule embed_counts:
+# rule concat_samples:
+#     input:
+#         expand("results/qc/{s}.filtered.h5ad", s=SAMPLES)
+#     output:
+#         "results/integration/concat.h5ad"
+#     params:
+#         batch_key = lambda wc: config.get("integration", {}).get("batch_key", "sample")
+#     conda:
+#         "environments/scanpy.yaml"
+#     script:
+#         "scripts/concat_samples.py"
+
+
+# rule pca:
+#   input:  "results/integration/concat.h5ad"
+#   output: directory("results/integration/pca")
+#   params:
+#     pca_cfg=lambda wc: {"target_sum":1e4, "log1p":True, "n_hvgs":3000, "n_comps":50,
+#                         "hvg_flavor":"seurat", "scale_max":10.0, "svd_solver":"arpack",
+#                         "zero_center":True, "random_state":0}
+#   conda:  "environments/scanpy.yaml"
+#   script: "scripts/pca_from_concat.py"
+
+############################
+# 3) PCA (once, reused)
+############################
+rule pca:
     input:
         "results/integration/concat.h5ad"
     output:
-        dir = directory("results/integration/embedding")
+        directory("results/integration/pca")
     params:
-        target_sum=1e4, log1p=True, n_hvgs=2000, hvg_flavor="seurat_v3",
-        scale_max=10.0, n_comps=50, zero_center=True, svd_solver="arpack", random_state=0
+        pca_cfg = {
+            "target_sum": 1e4,
+            "log1p": True,
+            "n_hvgs": _COMMON.get("n_top_genes", 3000),
+            "hvg_flavor": "seurat_v3",
+            "scale_max": 10.0,
+            "n_comps": _COMMON.get("pca_comps", 50),
+            "zero_center": True,
+            "svd_solver": "arpack",
+            "random_state": 0,
+        }
     conda:
-        "workflow/environments/scanpy.yaml"
+        "environments/scanpy.yaml"
     script:
-        "workflow/scripts/embed_counts.py"
+        "scripts/pca_from_concat.py"
+
+#########################################
+# 4) Integration per run → X_latent.npy
+#########################################
+rule integrate_run:
+    input:
+        concat = "results/integration/concat.h5ad",
+        pca    = "results/integration/pca/X_pca.npy"
+    output:
+        emb_dir  = directory("results/{run}/embedding"),
+        manifest = "results/{run}/embedding/manifest.json"
+    params:
+        run_cfg = lambda wc: rcfg(wc.run)
+    conda:
+        lambda wc: env_for("integrate", rcfg(wc.run).get("method"))
+    script:
+        "scripts/integrate_toggle.py"
+
+
+##################################################
+# 5) Graph + UMAP + Leiden per run (neighbors_k)
+##################################################
+rule graph_layout_cluster_run:
+    input:
+        concat   = "results/integration/concat.h5ad",
+        latent   = "results/{run}/embedding/X_latent.npy",
+        idx      = "results/{run}/embedding/X_latent.index.csv",
+        manifest = "results/{run}/embedding/manifest.json"
+    output:
+        knn      = "results/{run}/graph/knn.npz",
+        umap     = "results/{run}/umap/umap.csv",
+        leiden   = "results/{run}/cluster/leiden.csv",
+        manifest = "results/{run}/graph/manifest.json"
+    params:
+        run_cfg = lambda wc: rcfg(wc.run)  # carries method, batch_key, neighbors_k, umap_min_dist, cluster_resolution
+    conda:
+        lambda wc: env_for("graph", rcfg(wc.run).get("method"))
+    script:
+        "scripts/graph_umap_leiden.py"
+
 
 
 # # workflow/Snakefile

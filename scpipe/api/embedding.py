@@ -7,21 +7,20 @@ from ..ops.artifacts import save_embedding, save_loadings, save_json
 
 def _choose_emb_key(outputs: Dict[str, Any]) -> str:
     for k in ("obsm.X_pca", "obsm.X_scvi", "obsm.X_pca_harmony"):
-        if k in outputs:
-            return k
-    raise ValueError("Embedding Result lacks a known embedding key (obsm.X_pca / X_scvi / X_pca_harmony).")
+        if k in outputs: return k
+    raise ValueError("Embedding Result lacks a known embedding key.")
 
-def save_embedding_result(res: Result, obs_names: Sequence[str], out_dir: str | Path) -> Dict[str, Any]:
+def save_embedding_result(res: Result, obs_names: Sequence[str], out_dir: str | Path, *, save_loadings_: bool=False) -> Dict[str, Any]:
     if res.kind != "embedding":
-        raise ValueError(f"save_embedding_result expects Result(kind='embedding'), got {res.kind}")
+        raise ValueError(f"Expected Result(kind='embedding'), got {res.kind}")
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
 
     emb_key = _choose_emb_key(res.outputs)
-    short = emb_key.split(".")[-1]  # e.g., X_pca
+    short = emb_key.split(".")[-1]  # e.g. X_pca
     paths: Dict[str, Any] = {}
     paths[emb_key] = save_embedding(res.outputs[emb_key], obs_names, out, key=short)
 
-    if res.outputs.get("varm.PCs") is not None and res.outputs.get("var.hvg_names") is not None:
+    if save_loadings_ and res.outputs.get("varm.PCs") is not None and res.outputs.get("var.hvg_names") is not None:
         paths["varm.PCs"] = save_loadings(res.outputs["varm.PCs"], res.outputs["var.hvg_names"], out, key="PCs")
 
     manifest = {
@@ -32,6 +31,7 @@ def save_embedding_result(res: Result, obs_names: Sequence[str], out_dir: str | 
     }
     paths["manifest"] = {"json": save_json(manifest, out / "manifest.json")}
     return paths
+
 
 # from __future__ import annotations
 # # lib/api/embedding.py

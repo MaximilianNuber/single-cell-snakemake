@@ -7,10 +7,9 @@ Kind = Literal["embedding", "neighbors", "umap", "clusters", "qc"]
 
 @dataclass(frozen=True)
 class Result:
-    """Small, JSON-ish envelope returned by ops."""
     kind: Kind
-    outputs: Mapping[str, Any] = field(default_factory=dict)
-    state:   Mapping[str, Any] = field(default_factory=dict)
+    outputs: Mapping[str, Any] = field(default_factory=dict)  # small arrays/tables only
+    state:   Mapping[str, Any] = field(default_factory=dict)  # params, schema/version
     metrics: Mapping[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
