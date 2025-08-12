@@ -1,48 +1,14 @@
 # -----------------------------
-# QC Snakefile (metrics → doublets → filter)
+# QC + Integration Snakefile
 # -----------------------------
-# Usage:
-#   snakemake --snakefile workflow/Snakefile --configfile config/config.yaml -n
-#   snakemake --snakefile workflow/Snakefile --configfile config/config.yaml --use-conda --cores 4
-#
-# Expected config (config/config.yaml):
-# samples:
-#   S01: "/abs/path/outs/filtered_feature_bc_matrix"
-#   S02: "/abs/path/outs/filtered_feature_bc_matrix"
-#
-# qc:
-#   percent_top: [20]
-#   min_cells_per_gene: 3
-#   nmads_total_counts: 5
-#   nmads_n_genes: 5
-#   nmads_pct_top: 5
-#   nmads_pct_mito: 3
-#   max_pct_mito: 8
-#   keep_doublets: false
-#
-# tools:
-#   emptydrops: null
-#   soupx: null
-#   doublets:
-#     method: "scdblfinder"   # or "scrublet" or null
-#     params:
-#       batch_key: null       # for scDblFinder
-#       # scrublet params:
-#       # expected_doublet_rate: 0.06
-#       # min_counts: 2
-#       # min_cells: 3
-# -----------------------------
-
-import os
-
-import csv
+import os, csv
 from pathlib import Path
+try:
+    from snakemake.exceptions import WorkflowError
+except Exception:
+    class WorkflowError(Exception): pass
 
-# ensure we have a config file (or pass --configfile on CLI)
-# configfile: "config/config.yaml"
-
-SHEET = Path(config.get("samples_tsv", "config/samples.tsv")).resolve()
-
+# ---------- Samples from YAML dict or TSV ----------
 def _read_samplesheet(path: Path):
     rows = []
     with open(path, newline="") as f:
@@ -50,37 +16,31 @@ def _read_samplesheet(path: Path):
         required = {"sample", "matrix"}
         if rdr.fieldnames is None or not required.issubset(rdr.fieldnames):
             missing = required - set(rdr.fieldnames or [])
-            raise ValueError(f"Samples TSV missing columns: {sorted(missing)}")
+            raise WorkflowError(f"Samples TSV missing columns: {sorted(missing)}")
         for row in rdr:
             s = (row.get("sample") or "").strip()
             m = (row.get("matrix") or "").strip()
-            if not s or not m:
-                continue
-            rows.append({k: (v.strip() if isinstance(v, str) else v) for k, v in row.items()})
-    # resolve relative matrix paths relative to the TSV’s directory
+            if s and m:
+                rows.append({k: (v.strip() if isinstance(v, str) else v) for k, v in row.items()})
     base = path.parent.resolve()
     def resolve(p):
         p = Path(p)
         return str((base / p).resolve()) if not p.is_absolute() else str(p)
-    # build mappings
-    sample_to_matrix = {}
-    sample_meta = {}
+    sample_to_matrix, sample_meta = {}, {}
     for r in rows:
         if r["sample"] in sample_to_matrix:
-            raise ValueError(f"Duplicate sample '{r['sample']}' in {path}")
+            raise WorkflowError(f"Duplicate sample '{r['sample']}' in {path}")
         sample_to_matrix[r["sample"]] = resolve(r["matrix"])
         sample_meta[r["sample"]] = {k: v for k, v in r.items() if k not in ("sample", "matrix")}
     return sample_to_matrix, sample_meta
 
-# choose source
 if "samples" in config:
     SAMPLE_TO_MATRIX = {str(k): str(v) for k, v in config["samples"].items()}
     SAMPLE_META = {k: {} for k in SAMPLE_TO_MATRIX}
 elif "samples_tsv" in config:
     SHEET = Path(config["samples_tsv"]).resolve()
-    SAMPLE_TO_MATRIX, SAMPLE_META = _read_samplesheet(SHEET)  # <-- unpack both
+    SAMPLE_TO_MATRIX, SAMPLE_META = _read_samplesheet(SHEET)
 else:
-    # optional default TSV if present
     default_sheet = Path("config/samples.tsv")
     if default_sheet.exists():
         SAMPLE_TO_MATRIX, SAMPLE_META = _read_samplesheet(default_sheet.resolve())
@@ -89,111 +49,14 @@ else:
 
 SAMPLES = sorted(SAMPLE_TO_MATRIX.keys())
 
-
-rule all:
-    input:
-        expand("results/qc/{sample}.metrics.h5ad", sample=SAMPLES),
-        expand("results/qc/{sample}.filtered.h5ad", sample=SAMPLES),
-        "results/integration/concat.h5ad",
-        expand("results/{run}/umap/umap.csv", run=RUNS),
-        expand("results/{run}/cluster/leiden.csv", run=RUNS)
-
-# -----------------------------
-# 1) QC metrics (Scanpy only)
-# -----------------------------
-rule qc_metrics:
-    input:
-        matrix = lambda wc: config["samples"][wc.sample]
-    output:
-        h5ad = "results/qc/{sample}.metrics.h5ad"
-    params:
-        percent_top = lambda wc: config.get("qc", {}).get("percent_top", [20])
-    conda:
-        "environments/r_qc.yaml"
-    script:
-        "scripts/qc_compute_metrics.py"
-
-# -----------------------------
-# 2) Doublets (choose by config)
-#    Writes a standard TSV: barcode, is_doublet, dbl_score
-# -----------------------------
-
-DBL_METHOD = (
-    config.get("tools", {})
-          .get("doublets", {})
-          .get("method", None)
-)
-
-if DBL_METHOD == "scdblfinder":
-    rule doublets:
-        input:
-            h5ad = "results/qc/{sample}.metrics.h5ad"
-        output:
-            tsv = "results/qc/{sample}.doublets.tsv"
-        params:
-            batch_key = lambda wc: config["tools"]["doublets"]["params"].get("batch_key", None)
-        conda:
-            "environments/r_qc.yaml"
-        script:
-            "scripts/run_scdblfinder.py"
-
-elif DBL_METHOD == "scrublet":
-    rule doublets:
-        input:
-            h5ad = "results/qc/{sample}.metrics.h5ad"
-        output:
-            tsv = "results/qc/{sample}.doublets.tsv"
-        params:
-            scrublet_params = lambda wc: config["tools"]["doublets"]["params"]
-        conda:
-            "environments/scrublet_legacy.yaml"
-        script:
-            "scripts/run_scrublet.py"
-
-else:
-    # No doublet caller selected: emit an empty TSV header so downstream rule has predictable input.
-    rule doublets:
-        input:
-            h5ad = "results/qc/{sample}.metrics.h5ad"
-        output:
-            tsv = "results/qc/{sample}.doublets.tsv"
-        run:
-            os.makedirs(os.path.dirname(output.tsv), exist_ok=True)
-            with open(output.tsv, "w") as f:
-                f.write("barcode\tis_doublet\tdbl_score\n")
-
-# -----------------------------
-# 3) Filter (MAD thresholds + optional doublet removal)
-#    Consumes metrics H5AD and doublets TSV
-# -----------------------------
-rule qc_filter:
-    input:
-        h5ad = "results/qc/{sample}.metrics.h5ad",
-        dbl  = "results/qc/{sample}.doublets.tsv"
-    output:
-        h5ad = "results/qc/{sample}.filtered.h5ad"
-    params:
-        qc_cfg = lambda wc: config.get("qc", {}),
-        percent_top = lambda wc: (config.get("qc", {}).get("percent_top", [20]) or [20])[0]
-    conda:
-        "environments/scanpy.yaml"
-    script:
-        "scripts/qc_filter.py"
-
-
-
-#############################################
-# 1) Integration runs & env selection       #
-#############################################
+# ---------- Integration config & env selection ----------
 _INTEG  = config.get("integration", {})
 _COMMON = _INTEG.get("common", {})
 _RUNS   = _INTEG.get("runs", [{"name": "unintegrated", "method": "none"}])
 
 RUNS   = [r["name"] for r in _RUNS]
 RUNCFG = {r["name"]: ({**_COMMON, **r}) for r in _RUNS}
-
-def rcfg(run_name):  # per-run merged config
-    return RUNCFG[run_name]
+def rcfg(run_name): return RUNCFG[run_name]
 
 _DEFAULT_ENVS = {
     "integrate": {
@@ -209,15 +72,81 @@ _DEFAULT_ENVS = {
         "scvi":    "environments/scanpy.yaml",
     },
 }
-
 def env_for(stage: str, method: str) -> str:
     m = (method or "none").lower()
     envs_cfg = config.get("integration", {}).get("envs", {})
     return envs_cfg.get(stage, {}).get(m, _DEFAULT_ENVS[stage][m])
 
-############################
-# 2) Concat → combined.h5ad
-############################
+# ---------- Make 'all' the FIRST rule (no wildcards) ----------
+rule all:
+    input:
+        # QC products for all samples
+        expand("results/qc/{sample}.metrics.h5ad", sample=SAMPLES),
+        expand("results/qc/{sample}.filtered.h5ad", sample=SAMPLES),
+        # concat + all integration variants
+        "results/integration/concat.h5ad",
+        expand("results/{run}/umap/umap.csv", run=RUNS),
+        expand("results/{run}/cluster/leiden.csv", run=RUNS)
+
+# -----------------------------
+# QC
+# -----------------------------
+rule qc_metrics:
+    input:
+        matrix = lambda wc: SAMPLE_TO_MATRIX[wc.sample]
+    output:
+        h5ad = "results/qc/{sample}.metrics.h5ad"
+    params:
+        percent_top = lambda wc: config.get("qc", {}).get("percent_top", [20])
+    conda:
+        "environments/scanpy.yaml"
+    script:
+        "scripts/qc_compute_metrics.py"
+
+DBL_METHOD = (config.get("tools", {}).get("doublets", {}).get("method", None))
+
+if DBL_METHOD == "scdblfinder":
+    rule doublets:
+        input:  h5ad = "results/qc/{sample}.metrics.h5ad"
+        output: tsv  = "results/qc/{sample}.doublets.tsv"
+        params: batch_key = lambda wc: config["tools"]["doublets"]["params"].get("batch_key", None)
+        conda:  "environments/r_qc.yaml"
+        script: "scripts/run_scdblfinder.py"
+
+elif DBL_METHOD == "scrublet":
+    rule doublets:
+        input:  h5ad = "results/qc/{sample}.metrics.h5ad"
+        output: tsv  = "results/qc/{sample}.doublets.tsv"
+        params: scrublet_params = lambda wc: config["tools"]["doublets"]["params"]
+        conda:  "environments/scrublet_legacy.yaml"
+        script: "scripts/run_scrublet.py"
+
+else:
+    rule doublets:
+        input:  h5ad = "results/qc/{sample}.metrics.h5ad"
+        output: tsv  = "results/qc/{sample}.doublets.tsv"
+        run:
+            os.makedirs(os.path.dirname(output.tsv), exist_ok=True)
+            with open(output.tsv, "w") as f:
+                f.write("barcode\tis_doublet\tdbl_score\n")
+
+rule qc_filter:
+    input:
+        h5ad = "results/qc/{sample}.metrics.h5ad",
+        dbl  = "results/qc/{sample}.doublets.tsv"
+    output:
+        h5ad = "results/qc/{sample}.filtered.h5ad"
+    params:
+        qc_cfg = lambda wc: config.get("qc", {}),
+        percent_top = lambda wc: (config.get("qc", {}).get("percent_top", [20]) or [20])[0]
+    conda:
+        "environments/scanpy.yaml"
+    script:
+        "scripts/qc_filter.py"
+
+# -----------------------------
+# Integration
+# -----------------------------
 rule concat_samples:
     input:
         expand("results/qc/{s}.filtered.h5ad", s=SAMPLES)
@@ -230,37 +159,34 @@ rule concat_samples:
     script:
         "scripts/concat_samples.py"
 
-# rule concat_samples:
+# rule pca:
 #     input:
-#         expand("results/qc/{s}.filtered.h5ad", s=SAMPLES)
-#     output:
 #         "results/integration/concat.h5ad"
+#     output:
+#         directory("results/integration/pca")
 #     params:
-#         batch_key = lambda wc: config.get("integration", {}).get("batch_key", "sample")
+#         pca_cfg = {
+#             "target_sum": 1e4,
+#             "log1p": True,
+#             "n_hvgs": _COMMON.get("n_top_genes", 3000),
+#             "hvg_flavor": "seurat_v3",
+#             "scale_max": 10.0,
+#             "n_comps": _COMMON.get("pca_comps", 50),
+#             "zero_center": True,
+#             "svd_solver": "arpack",
+#             "random_state": 0,
+#         }
 #     conda:
 #         "environments/scanpy.yaml"
 #     script:
-#         "scripts/concat_samples.py"
-
-
-# rule pca:
-#   input:  "results/integration/concat.h5ad"
-#   output: directory("results/integration/pca")
-#   params:
-#     pca_cfg=lambda wc: {"target_sum":1e4, "log1p":True, "n_hvgs":3000, "n_comps":50,
-#                         "hvg_flavor":"seurat", "scale_max":10.0, "svd_solver":"arpack",
-#                         "zero_center":True, "random_state":0}
-#   conda:  "environments/scanpy.yaml"
-#   script: "scripts/pca_from_concat.py"
-
-############################
-# 3) PCA (once, reused)
-############################
+#         "scripts/pca_from_concat.py"
 rule pca:
     input:
         "results/integration/concat.h5ad"
     output:
-        directory("results/integration/pca")
+        x        = "results/integration/pca/X_pca.npy",
+        idx      = "results/integration/pca/X_pca.index.csv",
+        manifest = "results/integration/pca/manifest.json"
     params:
         pca_cfg = {
             "target_sum": 1e4,
@@ -278,9 +204,6 @@ rule pca:
     script:
         "scripts/pca_from_concat.py"
 
-#########################################
-# 4) Integration per run → X_latent.npy
-#########################################
 rule integrate_run:
     input:
         concat = "results/integration/concat.h5ad",
@@ -295,10 +218,6 @@ rule integrate_run:
     script:
         "scripts/integrate_toggle.py"
 
-
-##################################################
-# 5) Graph + UMAP + Leiden per run (neighbors_k)
-##################################################
 rule graph_layout_cluster_run:
     input:
         concat   = "results/integration/concat.h5ad",
@@ -311,93 +230,8 @@ rule graph_layout_cluster_run:
         leiden   = "results/{run}/cluster/leiden.csv",
         manifest = "results/{run}/graph/manifest.json"
     params:
-        run_cfg = lambda wc: rcfg(wc.run)  # carries method, batch_key, neighbors_k, umap_min_dist, cluster_resolution
+        run_cfg = lambda wc: rcfg(wc.run)
     conda:
         lambda wc: env_for("graph", rcfg(wc.run).get("method"))
     script:
         "scripts/graph_umap_leiden.py"
-
-
-
-# # workflow/Snakefile
-# configfile: "config/config.yaml"
-
-# SAMPLES = list(config["samples"].keys())
-
-# rule all:
-#     input:
-#         expand("results/qc/{sample}.metrics.h5ad", sample=SAMPLES),
-#         expand("results/qc/{sample}.filtered.h5ad", sample=SAMPLES)
-
-# # ---- 1) Compute metrics (Scanpy) ----
-# rule qc_metrics:
-#     input:
-#         matrix = lambda wildcards: config["samples"][wildcards.sample]
-#     output:
-#         h5ad = "results/qc/{sample}.metrics.h5ad"
-#     params:
-#         percent_top = lambda wc: config["qc"].get("percent_top", [20]),
-#         # tool configs for optional R steps (we run only if configured)
-#         emptydrops = config["tools"].get("emptydrops", None),
-#         soupx     = config["tools"].get("soupx", None),
-#         scdbl     = (config["tools"]["doublets"]["params"]
-#                      if config["tools"].get("doublets", {}).get("method") == "scdblfinder" else None)
-#     conda: "environments/scanpy.yaml"   # metrics are pure scanpy; we call R in a separate rule below if you prefer
-#     script:
-#         "scripts/qc_compute_metrics.py"
-
-# # ---- 2a) scDblFinder (R) -> produce a simple TSV with is_doublet + score ----
-# rule scdblfinder:
-#     input:
-#         h5ad = "results/qc/{sample}.metrics.h5ad"
-#     output:
-#         tsv = "results/qc/{sample}.doublets.tsv"
-#     params:
-#         batch_key = lambda wc: (config["tools"]["doublets"]["params"].get("batch_key", None)
-#                                 if config["tools"].get("doublets", {}).get("method") == "scdblfinder" else None)
-#     conda: "environments/r_qc.yaml"
-#     script:
-#         "scripts/run_scdblfinder.py"
-#     # run:
-#     #     # If the chosen method isn't scDblFinder, mark output as empty to keep DAG happy.
-#     #     pass
-
-# # ---- 2b) Scrublet (legacy Python) -> same TSV format ----
-# rule scrublet:
-#     input:
-#         h5ad = "results/qc/{sample}.metrics.h5ad"
-#     output:
-#         tsv = "results/qc/{sample}.doublets.tsv"
-#     params:
-#         scrublet_params = lambda wc: config["tools"]["doublets"]["params"]
-#     conda: "environments/scrublet_legacy.yaml"
-#     script:
-#         "scripts/run_scrublet.py"
-#     # run:
-#     #     pass
-
-# # Choose exactly one doublet rule per sample depending on config
-# use rule scdblfinder as doublets with:
-#     run:
-#         if config["tools"].get("doublets", {}).get("method") != "scdblfinder":
-#             # produce an empty/no-op TSV if not selected
-#             shell("echo -e 'barcode\tis_doublet\tdbl_score' > {output.tsv}")
-
-# use rule scrublet as doublets_scrublet with:
-#     run:
-#         if config["tools"].get("doublets", {}).get("method") != "scrublet":
-#             shell("echo -e 'barcode\tis_doublet\tdbl_score' > {output.tsv}")
-
-# # ---- 3) Filter (merges doublets.tsv if it exists) ----
-# rule qc_filter:
-#     input:
-#         h5ad = "results/qc/{sample}.metrics.h5ad",
-#         dbl  = "results/qc/{sample}.doublets.tsv"
-#     output:
-#         h5ad = "results/qc/{sample}.filtered.h5ad"
-#     params:
-#         qc_cfg = config["qc"],
-#         percent_top = lambda wc: config["qc"].get("percent_top", [20])[0]  # first bucket
-#     conda: "environments/scanpy.yaml"
-#     script:
-#         "scripts/qc_filter.py"
