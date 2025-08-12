@@ -1,6 +1,6 @@
 # config/config.yaml
-samples:
-  S01: "/Users/maximiliannuber/Documents/my_packages/snakemake_test/snakemake_bioinfo_project/snakemake_test_data/pbmc10k/outs/filtered_feature_bc_matrix"
+samples_tsv: "config/samples.tsv"
+
 qc:
   percent_top: [20]
   min_cells_per_gene: 3

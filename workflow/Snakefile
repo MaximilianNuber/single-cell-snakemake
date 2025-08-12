@@ -204,12 +204,27 @@ rule pca:
     script:
         "scripts/pca_from_concat.py"
 
+# rule integrate_run:
+#     input:
+#         concat = "results/integration/concat.h5ad",
+#         pca    = "results/integration/pca/X_pca.npy"
+#     output:
+#         emb_dir  = directory("results/{run}/embedding"),
+#         manifest = "results/{run}/embedding/manifest.json"
+#     params:
+#         run_cfg = lambda wc: rcfg(wc.run)
+#     conda:
+#         lambda wc: env_for("integrate", rcfg(wc.run).get("method"))
+#     script:
+#         "scripts/integrate_toggle.py"
+
 rule integrate_run:
     input:
         concat = "results/integration/concat.h5ad",
         pca    = "results/integration/pca/X_pca.npy"
     output:
-        emb_dir  = directory("results/{run}/embedding"),
+        latent   = "results/{run}/embedding/X_latent.npy",
+        idx      = "results/{run}/embedding/X_latent.index.csv",
         manifest = "results/{run}/embedding/manifest.json"
     params:
         run_cfg = lambda wc: rcfg(wc.run)
