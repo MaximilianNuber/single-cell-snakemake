@@ -1,4 +1,3 @@
-# Build neighbors (standard or BBKNN), UMAP, and Leiden from X_latent
 from __future__ import annotations
 from pathlib import Path
 import json

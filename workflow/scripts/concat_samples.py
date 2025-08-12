@@ -1,4 +1,3 @@
-# Concatenate per-sample filtered H5ADs into one combined.h5ad
 from __future__ import annotations
 from pathlib import Path
 import re

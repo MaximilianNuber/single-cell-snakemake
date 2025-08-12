@@ -1,0 +1,21 @@
+channel_priority: strict
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - pip=24.2
+  - scanpy=1.10.4
+  - anndata=0.11.3
+  - scikit-learn=1.6.1
+  - pandas=2.2.3
+  - numpy=1.26.4
+  - pip:
+      - torch==2.5.1
+      - torchvision==0.20.1
+      - torchaudio==2.5.1
+      - jax==0.5.0
+      - jaxlib==0.5.0
+      - jax-cuda12-pjrt==0.5.0
+      - jax-cuda12-plugin==0.5.0
+      - scvi-tools==1.2.2.post2

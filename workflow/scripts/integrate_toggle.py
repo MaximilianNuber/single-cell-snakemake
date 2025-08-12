@@ -1,4 +1,3 @@
-# Produce X_latent from either PCA (none/bbknn/harmony) or counts (scvi)
 from __future__ import annotations
 from pathlib import Path
 import json
